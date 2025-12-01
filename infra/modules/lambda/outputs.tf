@@ -9,3 +9,15 @@ output "lambda_invoke_arn" {
 output "lambda_function_arn" {
   value = aws_lambda_function.demo.arn
 }
+
+output "uploader_function_name" {
+  value = aws_lambda_function.uploader.function_name
+}
+
+output "uploader_invoke_arn" {
+  value = aws_lambda_function.uploader.invoke_arn
+}
+
+output "uploader_function_arn" {
+  value = aws_lambda_function.uploader.arn
+}

@@ -5,3 +5,8 @@ variable "project_name" {
 variable "lambda_role_arn" {
   type = string
 }
+
+variable "s3_bucket_name" {
+  type        = string
+  description = "S3 bucket name for storing uploads"
+}

@@ -28,11 +28,14 @@ module "lambda" {
   source          = "./modules/lambda"
   project_name    = var.project_name
   lambda_role_arn = module.iam.lambda_role_arn
+  s3_bucket_name  = module.s3.bucket_name
 }
 
 module "apigw" {
-  source               = "./modules/apigw"
-  project_name         = var.project_name
-  lambda_function_name = module.lambda.lambda_function_name
-  lambda_invoke_arn    = module.lambda.lambda_invoke_arn
+  source                        = "./modules/apigw"
+  project_name                  = var.project_name
+  lambda_function_name          = module.lambda.lambda_function_name
+  lambda_invoke_arn             = module.lambda.lambda_invoke_arn
+  lambda_uploader_function_name = module.lambda.uploader_function_name
+  lambda_uploader_invoke_arn    = module.lambda.uploader_invoke_arn
 }
