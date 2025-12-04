@@ -43,9 +43,8 @@ ENV/
 env/
 .venv
 
-# AWS Lambda
-*.zip
-!*.template.zip
+# AWS Lambda Packages
+infra/modules/lambda/*.zip
 
 # IDEs
 .vscode/
@@ -53,7 +52,6 @@ env/
 *.swp
 *.swo
 *~
-.DS_Store
 
 # Logs
 *.log
@@ -94,14 +92,34 @@ secrets.json
 htmlcov/
 .tox/
 
-# Lambda dependencies (installed by pip install -t .)
-# These are installed in code/uploader/ and should not be committed
-code/uploader/boto3/
-code/uploader/botocore/
-code/uploader/s3transfer/
-code/uploader/jmespath/
-code/uploader/urllib3/
-code/uploader/dateutil/
-code/uploader/six.py
-code/uploader/bin/
-code/uploader/*.dist-info/
+# Lambda Layer build artifacts
+infra/layers/python-deps/python/
+infra/modules/lambda-layer/*.zip
+
+# Lambda dependencies should NOT be in code directories
+# (they are now in Lambda Layers)
+code/**/*.dist-info/
+code/**/bin/
+code/**/boto3/
+code/**/botocore/
+code/**/s3transfer/
+code/**/jmespath/
+code/**/urllib3/
+code/**/dateutil/
+code/**/six.py
+code/**/typing_extensions.py
+code/**/openai/
+code/**/httpx/
+code/**/pydantic/
+code/**/anyio/
+code/**/certifi/
+code/**/distro/
+code/**/h11/
+code/**/httpcore/
+code/**/idna/
+code/**/jiter/
+code/**/sniffio/
+code/**/tqdm/
+code/**/annotated_types/
+code/**/pydantic_core/
+code/**/typing_inspection/

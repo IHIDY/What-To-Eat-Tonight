@@ -13,7 +13,7 @@ import boto3
 s3 = boto3.client("s3")
 BUCKET = os.environ.get("S3_BUCKET_NAME", "what-to-eat-cloud-recipes")
 
-# Presigned URL 过期时间（秒）
+# Presigned URL expiration time (seconds)
 PRESIGNED_URL_EXPIRATION = 3600  # 1 hour
 
 def handler(event, context):

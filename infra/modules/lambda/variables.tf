@@ -10,3 +10,8 @@ variable "s3_bucket_name" {
   type        = string
   description = "S3 bucket name for storing uploads"
 }
+
+variable "lambda_layer_arn" {
+  type        = string
+  description = "ARN of the Python dependencies Lambda Layer"
+}

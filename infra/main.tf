@@ -14,8 +14,9 @@ provider "aws" {
 }
 
 module "s3" {
-  source      = "./modules/s3"
-  bucket_name = "${var.project_name}-recipes"
+  source                       = "./modules/s3"
+  bucket_name                  = "${var.project_name}-recipes"
+  vision_processor_lambda_arn  = module.lambda.vision_processor_function_arn
 }
 
 module "iam" {
@@ -24,11 +25,17 @@ module "iam" {
   s3_bucket_arn   = module.s3.bucket_arn
 }
 
+module "lambda_layer" {
+  source       = "./modules/lambda-layer"
+  project_name = var.project_name
+}
+
 module "lambda" {
   source          = "./modules/lambda"
   project_name    = var.project_name
   lambda_role_arn = module.iam.lambda_role_arn
   s3_bucket_name  = module.s3.bucket_name
+  lambda_layer_arn = module.lambda_layer.layer_arn
 }
 
 module "apigw" {

@@ -4,7 +4,8 @@ resource "aws_lambda_function" "demo" {
   runtime       = "python3.12"
   role          = var.lambda_role_arn
 
-  filename = "${path.module}/lambda.zip"
+  filename         = "${path.module}/lambda.zip"
+  source_code_hash = filebase64sha256("${path.module}/lambda.zip")
 }
 
 resource "aws_lambda_function" "uploader" {
@@ -13,6 +14,7 @@ resource "aws_lambda_function" "uploader" {
   runtime       = "python3.12"
   role          = var.lambda_role_arn
   filename      = "${path.module}/uploader.zip"
+  source_code_hash = filebase64sha256("${path.module}/uploader.zip")
 
   # Increase timeout for batch uploads (default is 3 seconds)
   timeout = 60  # 60 seconds (1 minute)
@@ -23,6 +25,31 @@ resource "aws_lambda_function" "uploader" {
   environment {
     variables = {
       S3_BUCKET_NAME = var.s3_bucket_name
+    }
+  }
+}
+
+resource "aws_lambda_function" "vision_processor" {
+  function_name = "${var.project_name}-vision-processor"
+  handler       = "app.handler"
+  runtime       = "python3.12"
+  role          = var.lambda_role_arn
+  filename      = "${path.module}/vision-processor.zip"
+  source_code_hash = filebase64sha256("${path.module}/vision-processor.zip")
+
+  # Use Lambda Layer for dependencies
+  layers = [var.lambda_layer_arn]
+
+  # Vision processing with OpenAI can take time
+  timeout = 120  # 120 seconds (2 minutes)
+
+  # Need more memory for image processing
+  memory_size = 2048  # MB
+
+  environment {
+    variables = {
+      S3_BUCKET_NAME = var.s3_bucket_name
+      OPENAI_API_KEY = "REDACTED"
     }
   }
 }

@@ -21,3 +21,11 @@ output "uploader_invoke_arn" {
 output "uploader_function_arn" {
   value = aws_lambda_function.uploader.arn
 }
+
+output "vision_processor_function_name" {
+  value = aws_lambda_function.vision_processor.function_name
+}
+
+output "vision_processor_function_arn" {
+  value = aws_lambda_function.vision_processor.arn
+}
