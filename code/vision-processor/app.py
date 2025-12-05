@@ -17,7 +17,9 @@ s3 = boto3.client('s3')
 client = OpenAI(api_key=os.environ.get('OPENAI_API_KEY'))
 
 # Recipe extraction prompt using your schema
-RECIPE_EXTRACTION_PROMPT = """你是一个专业的食谱分析助手。请仔细分析这张食谱图片，提取所有相关信息并以 JSON 格式返回。
+RECIPE_EXTRACTION_PROMPT = """你是一个专业的食谱分析助手。我会提供一张或多张同一道菜的食谱图片，请综合分析所有图片，提取完整的菜谱信息并以 JSON 格式返回。
+
+如果有多张图片，请将它们的信息合并成一个完整的菜谱（例如：第一张是食材清单，第二张是步骤说明）。
 
 请按照以下 Schema 提取信息：
 
@@ -43,12 +45,12 @@ RECIPE_EXTRACTION_PROMPT = """你是一个专业的食谱分析助手。请仔�
   },
   "health": {
     "nutrition_estimate": {
-      "calories": null,
-      "protein_g": null,
-      "fat_g": null,
-      "carbs_g": null,
-      "fiber_g": null,
-      "sodium_mg": null
+      "calories": 估算的每份卡路里（kcal），基于食材和用量,
+      "protein_g": 估算的蛋白质克数,
+      "fat_g": 估算的脂肪克数,
+      "carbs_g": 估算的碳水化合物克数,
+      "fiber_g": 估算的膳食纤维克数,
+      "sodium_mg": 估算的钠含量（毫克）
     },
     "health_tags": ["健康标签"],
     "health_risk_notes": ["健康提示"]
@@ -61,6 +63,12 @@ RECIPE_EXTRACTION_PROMPT = """你是一个专业的食谱分析助手。请仔�
 2. difficulty 根据步骤复杂度判断
 3. health_tags 请根据食材判断
 4. category 请包含：菜系、主食材、烹饪方式、场景
+5. **nutrition_estimate 请根据食材种类和用量进行合理估算**：
+   - 参考常见食材的营养数据库
+   - 考虑烹饪方式（油炸会增加脂肪，蒸煮相对低卡）
+   - 按照 metadata.servings 计算每份的营养
+   - 如果无法合理估算某项，可以设为 null
+   - 调味料（盐、酱油等）也要计入钠含量
 
 请直接返回 JSON，不要添加任何解释文字。"""
 
@@ -90,21 +98,92 @@ def handler(event, context):
 
 
 def process_recipe_image(bucket, image_key):
-    """Extract recipe information using GPT-5.1 multimodal model"""
-    logger.info(f"Extracting recipe from: s3://{bucket}/{image_key}")
+    """Extract recipe information from all images in the same folder using GPT-5.1 multimodal model"""
+    logger.info(f"Triggered by: s3://{bucket}/{image_key}")
 
     try:
-        # Download image from S3
-        response = s3.get_object(Bucket=bucket, Key=image_key)
-        image_bytes = response['Body'].read()
-        image_base64 = base64.b64encode(image_bytes).decode('utf-8')
+        # Get upload_id folder from image_key
+        # images/raw/20251202-034138-03e81b1c/image-000.png -> images/raw/20251202-034138-03e81b1c/
+        parts = image_key.split('/')
+        if len(parts) < 3:
+            logger.error(f"Invalid image key format: {image_key}")
+            return
 
-        # Determine image type
-        image_type = "image/jpeg"
-        if image_key.lower().endswith('.png'):
-            image_type = "image/png"
+        folder_prefix = '/'.join(parts[:3]) + '/'
+        logger.info(f"Processing all images in folder: {folder_prefix}")
 
-        logger.info("Calling OpenAI GPT-5.1 API...")
+        # List all images in the same folder
+        response = s3.list_objects_v2(Bucket=bucket, Prefix=folder_prefix)
+
+        if 'Contents' not in response:
+            logger.warning(f"No images found in folder: {folder_prefix}")
+            return
+
+        # Collect all image files (skip non-image files)
+        image_keys = [
+            obj['Key'] for obj in response['Contents']
+            if obj['Key'].lower().endswith(('.png', '.jpg', '.jpeg'))
+        ]
+
+        if not image_keys:
+            logger.warning(f"No valid images found in folder: {folder_prefix}")
+            return
+
+        # Sort images to get consistent ordering
+        sorted_images = sorted(image_keys)
+
+        # Only process if this is the last image (highest index)
+        # This ensures all images are uploaded before processing
+        last_image = sorted_images[-1]
+        if image_key != last_image:
+            logger.info(f"Skipping processing: waiting for last image. Current: {image_key}, Last: {last_image}")
+            return
+
+        logger.info(f"Processing last uploaded image, found {len(sorted_images)} images: {sorted_images}")
+
+        # Continue with existing logic using sorted_images
+        response = s3.list_objects_v2(Bucket=bucket, Prefix=folder_prefix)
+
+        if 'Contents' not in response:
+            logger.warning(f"No images found in folder: {folder_prefix}")
+            return
+
+        # Collect all image files (skip non-image files)
+        image_keys = [
+            obj['Key'] for obj in response['Contents']
+            if obj['Key'].lower().endswith(('.png', '.jpg', '.jpeg'))
+        ]
+
+        if not image_keys:
+            logger.warning(f"No valid images found in folder: {folder_prefix}")
+            return
+
+        logger.info(f"Found {len(image_keys)} images: {image_keys}")
+
+        # Download and encode all images
+        image_contents = []
+        for img_key in sorted(image_keys):  # Sort to maintain consistent order
+            img_response = s3.get_object(Bucket=bucket, Key=img_key)
+            img_bytes = img_response['Body'].read()
+            img_base64 = base64.b64encode(img_bytes).decode('utf-8')
+
+            # Determine image type
+            img_type = "image/jpeg"
+            if img_key.lower().endswith('.png'):
+                img_type = "image/png"
+
+            image_contents.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{img_type};base64,{img_base64}"
+                }
+            })
+
+        # Build message content with prompt + all images
+        message_content = [{"type": "text", "text": RECIPE_EXTRACTION_PROMPT}]
+        message_content.extend(image_contents)
+
+        logger.info(f"Calling OpenAI GPT-5.1 API with {len(image_contents)} images...")
 
         # Call OpenAI API with GPT-5.1 multimodal model
         completion = client.chat.completions.create(
@@ -112,15 +191,7 @@ def process_recipe_image(bucket, image_key):
             messages=[
                 {
                     "role": "user",
-                    "content": [
-                        {"type": "text", "text": RECIPE_EXTRACTION_PROMPT},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:{image_type};base64,{image_base64}"
-                            }
-                        }
-                    ]
+                    "content": message_content
                 }
             ],
             max_completion_tokens=2000,
@@ -151,13 +222,14 @@ def process_recipe_image(bucket, image_key):
             Body=json.dumps(recipe_json, ensure_ascii=False, indent=2).encode('utf-8'),
             ContentType='application/json',
             Metadata={
-                'source-image': image_key,
+                'source-folder': folder_prefix,
+                'image-count': str(len(image_keys)),
                 'model': 'gpt-5.1'
             }
         )
 
         logger.info(f"Saved to: s3://{bucket}/{json_key}")
-        return {'json_key': json_key}
+        return {'json_key': json_key, 'image_count': len(image_keys)}
 
     except json.JSONDecodeError as e:
         logger.error(f"JSON parse error: {str(e)}")
@@ -169,20 +241,111 @@ def process_recipe_image(bucket, image_key):
 
 
 def cleanup_recipe_json(bucket, image_key):
-    """Delete the corresponding JSON file when image is removed"""
+    """Handle image deletion: regenerate JSON with remaining images or delete if folder is empty"""
     try:
+        # Get upload_id folder from image_key
+        parts = image_key.split('/')
+        if len(parts) < 3:
+            logger.error(f"Invalid image key format: {image_key}")
+            return
+
+        folder_prefix = '/'.join(parts[:3]) + '/'
+        logger.info(f"Image deleted: {image_key}, checking folder: {folder_prefix}")
+
+        # List remaining images in the same folder
+        response = s3.list_objects_v2(Bucket=bucket, Prefix=folder_prefix)
+
+        # Collect remaining image files
+        remaining_images = []
+        if 'Contents' in response:
+            remaining_images = [
+                obj['Key'] for obj in response['Contents']
+                if obj['Key'].lower().endswith(('.png', '.jpg', '.jpeg'))
+            ]
+
         json_key = generate_json_key(image_key)
-        logger.info(f"Deleting: s3://{bucket}/{json_key}")
 
-        s3.delete_object(Bucket=bucket, Key=json_key)
-        logger.info("Deleted successfully")
+        if remaining_images:
+            # Still have images, regenerate JSON with remaining images
+            logger.info(f"Found {len(remaining_images)} remaining images, regenerating recipe...")
+            logger.info(f"Remaining images: {remaining_images}")
 
-        # Check and delete empty folder
-        folder_prefix = json_key.rsplit('/', 1)[0] + '/'
-        cleanup_empty_folder(bucket, folder_prefix)
+            # Reprocess with remaining images (same logic as process_recipe_image)
+            image_contents = []
+            for img_key in sorted(remaining_images):
+                img_response = s3.get_object(Bucket=bucket, Key=img_key)
+                img_bytes = img_response['Body'].read()
+                img_base64 = base64.b64encode(img_bytes).decode('utf-8')
+
+                img_type = "image/jpeg"
+                if img_key.lower().endswith('.png'):
+                    img_type = "image/png"
+
+                image_contents.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{img_type};base64,{img_base64}"
+                    }
+                })
+
+            # Build message content
+            message_content = [{"type": "text", "text": RECIPE_EXTRACTION_PROMPT}]
+            message_content.extend(image_contents)
+
+            logger.info(f"Calling OpenAI GPT-5.1 API with {len(image_contents)} images...")
+
+            # Call OpenAI API
+            completion = client.chat.completions.create(
+                model="gpt-5.1",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": message_content
+                    }
+                ],
+                max_completion_tokens=2000,
+                temperature=0.2
+            )
+
+            response_text = completion.choices[0].message.content.strip()
+
+            # Remove markdown code block markers
+            if response_text.startswith('```'):
+                response_text = response_text.split('```')[1]
+                if response_text.startswith('json'):
+                    response_text = response_text[4:]
+                response_text = response_text.strip()
+
+            recipe_json = json.loads(response_text)
+            logger.info(f"Re-extracted recipe: {recipe_json.get('title', 'Unknown')}")
+
+            # Update JSON file
+            s3.put_object(
+                Bucket=bucket,
+                Key=json_key,
+                Body=json.dumps(recipe_json, ensure_ascii=False, indent=2).encode('utf-8'),
+                ContentType='application/json',
+                Metadata={
+                    'source-folder': folder_prefix,
+                    'image-count': str(len(remaining_images)),
+                    'model': 'gpt-5.1'
+                }
+            )
+
+            logger.info(f"Updated JSON with {len(remaining_images)} remaining images")
+
+        else:
+            # No images left, delete the JSON file
+            logger.info(f"No remaining images, deleting JSON: {json_key}")
+            s3.delete_object(Bucket=bucket, Key=json_key)
+            logger.info("JSON deleted successfully")
+
+            # Check and delete empty folder
+            json_folder_prefix = json_key.rsplit('/', 1)[0] + '/'
+            cleanup_empty_folder(bucket, json_folder_prefix)
 
     except Exception as e:
-        logger.warning(f"Cleanup failed: {str(e)}")
+        logger.error(f"Cleanup/regeneration failed: {str(e)}", exc_info=True)
 
 
 def cleanup_empty_folder(bucket, folder_prefix):
