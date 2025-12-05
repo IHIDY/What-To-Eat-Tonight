@@ -5,3 +5,7 @@ variable "project_name" {
 variable "s3_bucket_arn" {
   type = string
 }
+
+variable "vision_processor_lambda_arn" {
+  type = string
+}

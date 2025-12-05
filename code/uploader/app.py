@@ -104,13 +104,47 @@ def generate_presigned_url(file_data, index=0, upload_id=None):
     Generate a presigned URL for direct S3 upload
 
     Args:
-        file_data: dict with 'file_type'
+        file_data: dict with 'file_type' or 'marker' flag
         index: file index for naming
         upload_id: unique upload session ID (timestamp-based folder)
 
     Returns:
         dict with presigned URL and metadata
     """
+    # Check if this is a marker file request
+    if file_data.get("marker") or file_data.get("file_type") == "complete":
+        # Generate marker file URL
+        file_key = f"images/raw/{upload_id}/.complete"
+        content_type = "text/plain"
+
+        logger.info(f"Generating presigned URL for marker file: s3://{BUCKET}/{file_key}")
+
+        try:
+            presigned_url = s3.generate_presigned_url(
+                'put_object',
+                Params={
+                    'Bucket': BUCKET,
+                    'Key': file_key,
+                    'ContentType': content_type
+                },
+                ExpiresIn=PRESIGNED_URL_EXPIRATION,
+                HttpMethod='PUT'
+            )
+        except Exception as e:
+            logger.error(f"Failed to generate presigned URL: {str(e)}")
+            raise ValueError(f"Failed to generate presigned URL: {str(e)}")
+
+        return {
+            "url": presigned_url,
+            "key": file_key,
+            "bucket": BUCKET,
+            "file_type": "complete",
+            "content_type": content_type,
+            "index": -1,
+            "method": "PUT",
+            "is_marker": True
+        }
+
     # Get file type (default to jpg)
     file_type = file_data.get("file_type", "jpg").lower()
 
