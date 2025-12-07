@@ -21,3 +21,13 @@ variable "lambda_uploader_invoke_arn" {
   type = string
   description = "Uploader Lambda invoke ARN for API Gateway integration"
 }
+
+variable "recipe_search_function_name" {
+  type = string
+  description = "Recipe search Lambda function name for permissions"
+}
+
+variable "recipe_search_invoke_arn" {
+  type = string
+  description = "Recipe search Lambda invoke ARN for API Gateway integration"
+}

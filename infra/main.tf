@@ -53,4 +53,6 @@ module "apigw" {
   lambda_invoke_arn             = module.lambda.lambda_invoke_arn
   lambda_uploader_function_name = module.lambda.uploader_function_name
   lambda_uploader_invoke_arn    = module.lambda.uploader_invoke_arn
+  recipe_search_function_name   = module.lambda.recipe_search_function_name
+  recipe_search_invoke_arn      = module.lambda.recipe_search_invoke_arn
 }

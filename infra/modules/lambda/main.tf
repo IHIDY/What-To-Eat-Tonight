@@ -57,3 +57,26 @@ resource "aws_lambda_function" "vision_processor" {
   }
 }
 
+resource "aws_lambda_function" "recipe_search" {
+  function_name = "${var.project_name}-recipe-search"
+  handler       = "app.handler"
+  runtime       = "python3.12"
+  role          = var.lambda_role_arn
+  filename      = "${path.module}/recipe-search.zip"
+  source_code_hash = filebase64sha256("${path.module}/recipe-search.zip")
+
+  # Use Lambda Layer for dependencies
+  layers = [var.lambda_layer_arn]
+
+  # Search should be fast
+  timeout = 30  # 30 seconds
+  memory_size = 512  # MB
+
+  environment {
+    variables = {
+      S3_BUCKET_NAME      = var.s3_bucket_name
+      OPENSEARCH_ENDPOINT = var.opensearch_endpoint
+    }
+  }
+}
+
