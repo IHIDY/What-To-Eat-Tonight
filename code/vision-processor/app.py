@@ -642,6 +642,36 @@ def index_recipe_to_opensearch(bucket, json_key, recipe_json):
         logger.info(f"Generating embedding for recipe {recipe_id}...")
         embedding = generate_bedrock_embedding(semantic_text)
 
+        # Extract ingredients and seasonings names for OpenSearch (keyword fields)
+        ingredients_list = recipe_json.get('ingredients', [])
+        seasonings_list = recipe_json.get('seasonings', [])
+
+        # Convert object arrays to simple string arrays
+        ingredients_names = []
+        for ing in ingredients_list:
+            if isinstance(ing, dict):
+                # Extract Chinese and English names
+                name = ing.get('name', '')
+                name_en = ing.get('name_en', '')
+                if name:
+                    ingredients_names.append(name)
+                if name_en and name_en != name:
+                    ingredients_names.append(name_en)
+            elif isinstance(ing, str):
+                ingredients_names.append(ing)
+
+        seasonings_names = []
+        for seasoning in seasonings_list:
+            if isinstance(seasoning, dict):
+                name = seasoning.get('name', '')
+                name_en = seasoning.get('name_en', '')
+                if name:
+                    seasonings_names.append(name)
+                if name_en and name_en != name:
+                    seasonings_names.append(name_en)
+            elif isinstance(seasoning, str):
+                seasonings_names.append(seasoning)
+
         # Prepare document for OpenSearch
         doc = {
             'recipe_id': recipe_id,
@@ -649,8 +679,8 @@ def index_recipe_to_opensearch(bucket, json_key, recipe_json):
             'title_en': recipe_json.get('title_en'),
             'description': recipe_json.get('description'),
             'description_en': recipe_json.get('description_en'),
-            'ingredients': recipe_json.get('ingredients', []),
-            'seasonings': recipe_json.get('seasonings', []),
+            'ingredients': ingredients_names,
+            'seasonings': seasonings_names,
             'category': recipe_json.get('category', []),
             'category_en': recipe_json.get('category_en', []),
             'health_tags': recipe_json.get('health', {}).get('health_tags', []),
