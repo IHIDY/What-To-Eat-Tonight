@@ -15,3 +15,8 @@ variable "lambda_layer_arn" {
   type        = string
   description = "ARN of the Python dependencies Lambda Layer"
 }
+
+variable "opensearch_endpoint" {
+  type        = string
+  description = "OpenSearch domain endpoint"
+}

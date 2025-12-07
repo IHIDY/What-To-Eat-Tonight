@@ -7,6 +7,8 @@ import time
 from datetime import datetime
 from openai import OpenAI
 from urllib.parse import unquote_plus
+from opensearchpy import OpenSearch, RequestsHttpConnection
+from requests_aws4auth import AWS4Auth
 
 # Setup logging
 logger = logging.getLogger()
@@ -15,6 +17,7 @@ logger.setLevel(logging.INFO)
 # AWS clients
 s3 = boto3.client('s3')
 lambda_client = boto3.client('lambda')
+bedrock = boto3.client('bedrock-runtime', region_name=os.environ.get('AWS_REGION', 'us-east-1'))
 
 # OpenAI client
 client = OpenAI(api_key=os.environ.get('OPENAI_API_KEY'))
@@ -22,6 +25,44 @@ client = OpenAI(api_key=os.environ.get('OPENAI_API_KEY'))
 # Lambda function name for self-invocation
 FUNCTION_NAME = os.environ.get('AWS_LAMBDA_FUNCTION_NAME')
 REGENERATION_DELAY_SECONDS = 10
+
+# OpenSearch configuration
+OPENSEARCH_ENDPOINT = os.environ.get('OPENSEARCH_ENDPOINT')
+AWS_REGION = os.environ.get('AWS_REGION', 'us-east-1')
+OPENSEARCH_INDEX = 'recipes'
+
+# Initialize OpenSearch client lazily
+_opensearch_client = None
+
+def get_opensearch_client():
+    """Create OpenSearch client with AWS4Auth (lazy initialization)"""
+    global _opensearch_client
+
+    if _opensearch_client is None:
+        if not OPENSEARCH_ENDPOINT:
+            logger.warning("OPENSEARCH_ENDPOINT not set, skipping OpenSearch integration")
+            return None
+
+        session = boto3.Session()
+        credentials = session.get_credentials()
+        awsauth = AWS4Auth(
+            credentials.access_key,
+            credentials.secret_key,
+            AWS_REGION,
+            'es',
+            session_token=credentials.token
+        )
+
+        _opensearch_client = OpenSearch(
+            hosts=[{'host': OPENSEARCH_ENDPOINT, 'port': 443}],
+            http_auth=awsauth,
+            use_ssl=True,
+            verify_certs=True,
+            connection_class=RequestsHttpConnection
+        )
+        logger.info(f"OpenSearch client initialized: {OPENSEARCH_ENDPOINT}")
+
+    return _opensearch_client
 
 # Recipe extraction prompt using your schema (bilingual Chinese/English)
 RECIPE_EXTRACTION_PROMPT = """你是一个专业的食谱分析助手。我会提供一张或多张同一道菜的食谱图片，请综合分析所有图片，提取完整的菜谱信息并以 JSON 格式返回。
@@ -85,7 +126,8 @@ RECIPE_EXTRACTION_PROMPT = """你是一个专业的食谱分析助手。我会�
     "health_tags_en": ["Health tags (English, e.g., high protein, low fat, vegetarian)"],
     "health_risk_notes": ["健康提示（中文）"],
     "health_risk_notes_en": ["Health notes (English)"]
-  }
+  },
+  "semantic_text": "用于语义搜索的自然语言描述（中英文混合）。请将菜谱信息以自然段落形式描述，包括：菜名、简介、主要食材、烹饪方法、适用场景、健康特点等。示例：'红烧肉 (Braised Pork Belly) 是一道经典的中式菜肴，适合宴客和节日聚餐。主要食材包括五花肉、冰糖、生抽、老抽、料酒等。制作过程包括切块、焯水、炒糖色、慢炖等步骤。这道菜口感软糯，肥而不腻，富含蛋白质和脂肪，适合冬季食用。属于川菜、家常菜。'"
 }
 ```
 
@@ -260,6 +302,10 @@ def process_recipe_image(bucket, image_key):
         )
 
         logger.info(f"Saved to: s3://{bucket}/{json_key}")
+
+        # Index to OpenSearch with embedding
+        index_recipe_to_opensearch(bucket, json_key, recipe_json)
+
         return {'json_key': json_key, 'image_count': len(image_keys)}
 
     except json.JSONDecodeError as e:
@@ -322,6 +368,9 @@ def cleanup_recipe_json(bucket, image_key):
                 logger.info("JSON deleted successfully")
             except:
                 pass
+
+            # Delete from OpenSearch
+            delete_recipe_from_opensearch(upload_id)
 
             # Delete empty folder
             json_folder_prefix = json_key.rsplit('/', 1)[0] + '/'
@@ -528,6 +577,9 @@ def regenerate_recipe_json(bucket, folder_prefix, upload_id):
 
         logger.info(f"Regenerated JSON saved to: s3://{bucket}/{json_key}")
 
+        # Re-index to OpenSearch with new embedding
+        index_recipe_to_opensearch(bucket, json_key, recipe_json)
+
     except json.JSONDecodeError as e:
         logger.error(f"Regeneration JSON parse error: {str(e)}")
         logger.error(f"Response (first 1000 chars): {response_text[:1000]}")
@@ -536,3 +588,105 @@ def regenerate_recipe_json(bucket, folder_prefix, upload_id):
     except Exception as e:
         logger.error(f"Regeneration failed: {str(e)}", exc_info=True)
         raise
+
+
+def generate_bedrock_embedding(text):
+    """Generate embedding using AWS Bedrock Titan Embeddings v2"""
+    try:
+        # Call Bedrock Titan Embeddings model
+        response = bedrock.invoke_model(
+            modelId='amazon.titan-embed-text-v2:0',
+            body=json.dumps({
+                "inputText": text,
+                "dimensions": 1024,
+                "normalize": True
+            })
+        )
+
+        # Parse response
+        response_body = json.loads(response['body'].read())
+        embedding = response_body['embedding']
+
+        logger.info(f"Generated embedding: {len(embedding)} dimensions")
+        return embedding
+
+    except Exception as e:
+        logger.error(f"Failed to generate Bedrock embedding: {str(e)}", exc_info=True)
+        raise
+
+
+def index_recipe_to_opensearch(bucket, json_key, recipe_json):
+    """Index or update recipe in OpenSearch with embedding"""
+    try:
+        os_client = get_opensearch_client()
+        if not os_client:
+            logger.warning("OpenSearch client not available, skipping indexing")
+            return
+
+        # Extract recipe_id from JSON key
+        recipe_id = json_key.split('/')[-1].replace('.json', '')
+
+        # Get semantic_text for embedding
+        semantic_text = recipe_json.get('semantic_text', '')
+        if not semantic_text:
+            logger.warning(f"No semantic_text found for {recipe_id}, skipping embedding")
+            return
+
+        # Generate embedding using Bedrock
+        logger.info(f"Generating embedding for recipe {recipe_id}...")
+        embedding = generate_bedrock_embedding(semantic_text)
+
+        # Prepare document for OpenSearch
+        doc = {
+            'recipe_id': recipe_id,
+            'title': recipe_json.get('title'),
+            'title_en': recipe_json.get('title_en'),
+            'description': recipe_json.get('description'),
+            'description_en': recipe_json.get('description_en'),
+            'ingredients': recipe_json.get('ingredients', []),
+            'seasonings': recipe_json.get('seasonings', []),
+            'category': recipe_json.get('category', []),
+            'category_en': recipe_json.get('category_en', []),
+            'health_tags': recipe_json.get('health', {}).get('health_tags', []),
+            'health_tags_en': recipe_json.get('health', {}).get('health_tags_en', []),
+            'difficulty': recipe_json.get('metadata', {}).get('difficulty'),
+            'servings': recipe_json.get('metadata', {}).get('servings'),
+            'semantic_text': semantic_text,
+            'semantic_embedding': embedding,
+            's3_key': json_key,
+            'indexed_at': datetime.utcnow().isoformat()
+        }
+
+        # Index to OpenSearch (will update if document with same ID exists)
+        os_client.index(
+            index=OPENSEARCH_INDEX,
+            id=recipe_id,
+            body=doc,
+            refresh=True  # Make immediately searchable
+        )
+
+        logger.info(f"Successfully indexed recipe {recipe_id} to OpenSearch")
+
+    except Exception as e:
+        logger.error(f"Failed to index recipe to OpenSearch: {str(e)}", exc_info=True)
+        # Don't raise - we don't want OpenSearch failures to break the main flow
+
+
+def delete_recipe_from_opensearch(recipe_id):
+    """Delete recipe from OpenSearch"""
+    try:
+        os_client = get_opensearch_client()
+        if not os_client:
+            logger.warning("OpenSearch client not available, skipping deletion")
+            return
+
+        os_client.delete(
+            index=OPENSEARCH_INDEX,
+            id=recipe_id
+        )
+
+        logger.info(f"Deleted recipe {recipe_id} from OpenSearch")
+
+    except Exception as e:
+        logger.error(f"Failed to delete recipe from OpenSearch: {str(e)}", exc_info=True)
+        # Don't raise - OpenSearch errors shouldn't break the main flow

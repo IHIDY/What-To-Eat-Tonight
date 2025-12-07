@@ -32,11 +32,18 @@ module "lambda_layer" {
 }
 
 module "lambda" {
-  source          = "./modules/lambda"
-  project_name    = var.project_name
-  lambda_role_arn = module.iam.lambda_role_arn
-  s3_bucket_name  = module.s3.bucket_name
-  lambda_layer_arn = module.lambda_layer.layer_arn
+  source               = "./modules/lambda"
+  project_name         = var.project_name
+  lambda_role_arn      = module.iam.lambda_role_arn
+  s3_bucket_name       = module.s3.bucket_name
+  lambda_layer_arn     = module.lambda_layer.layer_arn
+  opensearch_endpoint  = module.opensearch.domain_endpoint
+}
+
+module "opensearch" {
+  source            = "./modules/opensearch"
+  project_name      = var.project_name
+  lambda_role_arn   = module.iam.lambda_role_arn
 }
 
 module "apigw" {

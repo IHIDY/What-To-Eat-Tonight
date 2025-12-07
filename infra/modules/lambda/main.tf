@@ -1,3 +1,5 @@
+data "aws_region" "current" {}
+
 resource "aws_lambda_function" "demo" {
   function_name = "${var.project_name}-lambda"
   handler       = "index.handler"
@@ -48,8 +50,10 @@ resource "aws_lambda_function" "vision_processor" {
 
   environment {
     variables = {
-      S3_BUCKET_NAME = var.s3_bucket_name
-      OPENAI_API_KEY = "REDACTED"
+      S3_BUCKET_NAME      = var.s3_bucket_name
+      OPENAI_API_KEY      = "REDACTED"
+      OPENSEARCH_ENDPOINT = var.opensearch_endpoint
+      AWS_REGION          = data.aws_region.current.name
     }
   }
 }

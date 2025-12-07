@@ -9,3 +9,13 @@ output "lambda_name" {
 output "api_url" {
   value = module.apigw.invoke_url
 }
+
+output "opensearch_endpoint" {
+  value = module.opensearch.domain_endpoint
+  description = "OpenSearch domain endpoint"
+}
+
+output "opensearch_dashboard_url" {
+  value = "https://${module.opensearch.kibana_endpoint}"
+  description = "OpenSearch Dashboards URL"
+}
