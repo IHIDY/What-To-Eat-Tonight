@@ -53,7 +53,6 @@ resource "aws_lambda_function" "vision_processor" {
       S3_BUCKET_NAME      = var.s3_bucket_name
       OPENAI_API_KEY      = "REDACTED"
       OPENSEARCH_ENDPOINT = var.opensearch_endpoint
-      AWS_REGION          = data.aws_region.current.name
     }
   }
 }

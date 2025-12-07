@@ -16,6 +16,6 @@ output "opensearch_endpoint" {
 }
 
 output "opensearch_dashboard_url" {
-  value = "https://${module.opensearch.kibana_endpoint}"
+  value = try("https://${module.opensearch.kibana_endpoint}", null)
   description = "OpenSearch Dashboards URL"
 }
