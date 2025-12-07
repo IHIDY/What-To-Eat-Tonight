@@ -331,6 +331,12 @@ def cleanup_recipe_json(bucket, image_key):
         folder_prefix = '/'.join(parts[:3]) + '/'
         upload_id = parts[2]
 
+        # Skip marker files to avoid regeneration loop
+        filename = parts[-1]
+        if filename in ['.complete', '.pending-regeneration']:
+            logger.info(f"Marker file deleted, skipping regeneration: {image_key}")
+            return
+
         logger.info(f"Image deleted: {image_key}, marking for regeneration")
 
         # Check if there are any remaining images
