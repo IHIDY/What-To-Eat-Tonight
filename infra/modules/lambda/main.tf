@@ -2,12 +2,26 @@ data "aws_region" "current" {}
 
 resource "aws_lambda_function" "demo" {
   function_name = "${var.project_name}-lambda"
-  handler       = "index.handler"
+  handler       = "app.handler"
   runtime       = "python3.12"
   role          = var.lambda_role_arn
+  filename      = "${path.module}/chat.zip"
+  source_code_hash = filebase64sha256("${path.module}/chat.zip")
 
-  filename         = "${path.module}/lambda.zip"
-  source_code_hash = filebase64sha256("${path.module}/lambda.zip")
+  # Use Lambda Layer for dependencies
+  layers = [var.lambda_layer_arn]
+
+  # Chat with LLM can take time
+  timeout = 60  # 60 seconds (1 minute)
+  memory_size = 1024  # MB
+
+  environment {
+    variables = {
+      S3_BUCKET_NAME      = var.s3_bucket_name
+      OPENSEARCH_ENDPOINT = var.opensearch_endpoint
+      OPENAI_API_KEY      = "REDACTED"
+    }
+  }
 }
 
 resource "aws_lambda_function" "uploader" {

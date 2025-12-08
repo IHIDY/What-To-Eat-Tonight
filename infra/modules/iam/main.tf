@@ -43,7 +43,10 @@ resource "aws_iam_role_policy" "lambda_policy" {
       {
         Effect   = "Allow"
         Action   = ["bedrock:InvokeModel"]
-        Resource = "arn:aws:bedrock:*::foundation-model/amazon.titan-embed-text-v2:0"
+        Resource = [
+          "arn:aws:bedrock:*::foundation-model/amazon.titan-embed-text-v2:0",
+          "arn:aws:bedrock:*::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0"
+        ]
       }
     ]
   })
