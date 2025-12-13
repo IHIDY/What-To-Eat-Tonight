@@ -47,6 +47,17 @@ resource "aws_iam_role_policy" "lambda_policy" {
           "arn:aws:bedrock:*::foundation-model/amazon.titan-embed-text-v2:0",
           "arn:aws:bedrock:*::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0"
         ]
+      },
+      {
+        Effect   = "Allow"
+        Action   = [
+          "dynamodb:PutItem",
+          "dynamodb:GetItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:Query",
+          "dynamodb:Scan"
+        ]
+        Resource = "arn:aws:dynamodb:*:*:table/${var.project_name}-api-stats"
       }
     ]
   })

@@ -46,6 +46,11 @@ module "opensearch" {
   lambda_role_arn   = module.iam.lambda_role_arn
 }
 
+module "dynamodb" {
+  source       = "./modules/dynamodb"
+  project_name = var.project_name
+}
+
 module "apigw" {
   source                        = "./modules/apigw"
   project_name                  = var.project_name

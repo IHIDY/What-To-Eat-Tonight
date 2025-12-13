@@ -20,6 +20,7 @@ resource "aws_lambda_function" "demo" {
       S3_BUCKET_NAME      = var.s3_bucket_name
       OPENSEARCH_ENDPOINT = var.opensearch_endpoint
       OPENAI_API_KEY      = "REDACTED"
+      DYNAMODB_TABLE_NAME = "${var.project_name}-api-stats"
     }
   }
 }
@@ -90,6 +91,7 @@ resource "aws_lambda_function" "recipe_search" {
     variables = {
       S3_BUCKET_NAME      = var.s3_bucket_name
       OPENSEARCH_ENDPOINT = var.opensearch_endpoint
+      DYNAMODB_TABLE_NAME = "${var.project_name}-api-stats"
     }
   }
 }

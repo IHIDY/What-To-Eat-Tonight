@@ -7,6 +7,8 @@ Uses OpenAI GPT with function calling to search recipes and provide recommendati
 import os
 import json
 import boto3
+from datetime import datetime
+from decimal import Decimal
 from openai import OpenAI
 from opensearchpy import OpenSearch, RequestsHttpConnection
 from requests_aws4auth import AWS4Auth
@@ -15,11 +17,13 @@ from requests_aws4auth import AWS4Auth
 client = OpenAI(api_key=os.environ.get('OPENAI_API_KEY'))
 bedrock = boto3.client('bedrock-runtime', region_name=os.environ.get('AWS_REGION', 'us-east-1'))
 s3 = boto3.client('s3')
+dynamodb = boto3.client('dynamodb')
 
 # Configuration
 OPENSEARCH_ENDPOINT = os.environ.get('OPENSEARCH_ENDPOINT')
 AWS_REGION = os.environ.get('AWS_REGION', 'us-east-1')
 S3_BUCKET_NAME = os.environ.get('S3_BUCKET_NAME')
+DYNAMODB_TABLE_NAME = os.environ.get('DYNAMODB_TABLE_NAME')
 OPENSEARCH_INDEX = 'recipes'
 
 # Initialize OpenSearch client
@@ -51,6 +55,64 @@ def get_opensearch_client():
     return _opensearch_client
 
 
+def record_stat(metric_type, metric_id, increment=1, extra_attributes=None):
+    """
+    Record statistics to DynamoDB
+
+    Args:
+        metric_type: Type of metric (e.g., 'api_call', 'openai_api_call', 'recipe_view')
+        metric_id: ID of the metric (e.g., 'POST_/chat', 'gpt-4o', recipe_id)
+        increment: Value to increment count by (default: 1)
+        extra_attributes: Dictionary of additional attributes to update (e.g., total_tokens, total_cost)
+    """
+    if not DYNAMODB_TABLE_NAME:
+        return  # Skip if DynamoDB is not configured
+
+    try:
+        # Build update expression
+        update_parts = ['#count :inc']
+        attr_names = {'#count': 'count'}
+        attr_values = {':inc': {'N': str(increment)}, ':time': {'S': datetime.utcnow().isoformat()}}
+
+        # Add extra attributes if provided
+        set_parts = []
+        if extra_attributes:
+            for key, value in extra_attributes.items():
+                attr_name_placeholder = f'#{key}'
+                attr_value_placeholder = f':{key}'
+                attr_names[attr_name_placeholder] = key
+                set_parts.append(f'{attr_name_placeholder} = {attr_value_placeholder}')
+
+                # Handle different value types
+                if isinstance(value, (int, float)):
+                    attr_values[attr_value_placeholder] = {'N': str(value)}
+                elif isinstance(value, Decimal):
+                    attr_values[attr_value_placeholder] = {'N': str(value)}
+                else:
+                    attr_values[attr_value_placeholder] = {'S': str(value)}
+
+        # Add last_updated to SET parts
+        set_parts.append('last_updated = :time')
+
+        # Build final update expression
+        update_expression = f'ADD {update_parts[0]} SET {", ".join(set_parts)}'
+
+        dynamodb.update_item(
+            TableName=DYNAMODB_TABLE_NAME,
+            Key={
+                'metric_type': {'S': metric_type},
+                'metric_id': {'S': metric_id}
+            },
+            UpdateExpression=update_expression,
+            ExpressionAttributeNames=attr_names if len(attr_names) > 0 else None,
+            ExpressionAttributeValues=attr_values
+        )
+        print(f"Recorded stat: {metric_type}/{metric_id} +{increment}")
+    except Exception as e:
+        # Don't fail the main request if stats recording fails
+        print(f"Failed to record stat: {e}")
+
+
 def search_recipes(query, mode='hybrid', limit=5):
     """
     Search recipes using OpenSearch
@@ -79,6 +141,9 @@ def search_recipes(query, mode='hybrid', limit=5):
             )
             response_body = json.loads(response['body'].read())
             query_embedding = response_body['embedding']
+
+            # Record Bedrock API call
+            record_stat('bedrock_api_call', 'amazon.titan-embed-text-v2:0')
 
         # Build search query
         os_client = get_opensearch_client()
@@ -169,6 +234,9 @@ def search_recipes(query, mode='hybrid', limit=5):
                 recipe_json = json.loads(s3_response['Body'].read().decode('utf-8'))
                 recipe_json['search_score'] = hit['_score']
                 recipes.append(recipe_json)
+
+                # Record recipe view
+                record_stat('recipe_view', recipe_id)
             except Exception as e:
                 print(f"Error fetching recipe {recipe_id}: {e}")
                 continue
@@ -207,6 +275,9 @@ def handler(event, context):
             }
 
         print(f"User message: {user_message}")
+
+        # Record API call
+        record_stat('api_call', 'POST_/chat')
 
         # Define tools for OpenAI function calling
         tools = [
@@ -283,6 +354,21 @@ Be conversational and friendly. Support both Chinese and English. Use emojis occ
 
             response_message = response.choices[0].message
             print(f"OpenAI response: finish_reason={response.choices[0].finish_reason}")
+
+            # Record OpenAI API call statistics
+            if hasattr(response, 'usage') and response.usage:
+                tokens_used = response.usage.total_tokens
+                # GPT-5.1 pricing: input $1.25/1M, output $10.00/1M
+                # Using average of $5.625/1M for simplicity
+                estimated_cost = Decimal(str(tokens_used * 5.625 / 1_000_000))
+                record_stat(
+                    'openai_api_call',
+                    'gpt-5.1',
+                    extra_attributes={
+                        'total_tokens': tokens_used,
+                        'total_cost': estimated_cost
+                    }
+                )
 
             # Add assistant's response to messages
             # Convert response_message to dict for JSON serialization
