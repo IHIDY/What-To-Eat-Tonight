@@ -38,6 +38,7 @@ module "lambda" {
   s3_bucket_name       = module.s3.bucket_name
   lambda_layer_arn     = module.lambda_layer.layer_arn
   opensearch_endpoint  = module.opensearch.domain_endpoint
+  hashed_password      = var.hashed_password
 }
 
 module "opensearch" {
@@ -60,4 +61,6 @@ module "apigw" {
   lambda_uploader_invoke_arn    = module.lambda.uploader_invoke_arn
   recipe_search_function_name   = module.lambda.recipe_search_function_name
   recipe_search_invoke_arn      = module.lambda.recipe_search_invoke_arn
+  login_function_name           = module.lambda.login_function_name
+  login_invoke_arn              = module.lambda.login_invoke_arn
 }

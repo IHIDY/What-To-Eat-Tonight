@@ -20,3 +20,9 @@ variable "opensearch_endpoint" {
   type        = string
   description = "OpenSearch domain endpoint"
 }
+
+variable "hashed_password" {
+  type        = string
+  description = "SHA-256 hash of the login password"
+  sensitive   = true
+}

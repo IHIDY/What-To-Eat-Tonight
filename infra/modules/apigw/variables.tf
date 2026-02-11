@@ -31,3 +31,13 @@ variable "recipe_search_invoke_arn" {
   type = string
   description = "Recipe search Lambda invoke ARN for API Gateway integration"
 }
+
+variable "login_function_name" {
+  type        = string
+  description = "Login Lambda function name for permissions"
+}
+
+variable "login_invoke_arn" {
+  type        = string
+  description = "Login Lambda invoke ARN for API Gateway integration"
+}

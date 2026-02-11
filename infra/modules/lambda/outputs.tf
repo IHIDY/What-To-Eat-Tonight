@@ -41,3 +41,15 @@ output "recipe_search_invoke_arn" {
 output "recipe_search_function_arn" {
   value = aws_lambda_function.recipe_search.arn
 }
+
+output "login_function_name" {
+  value = aws_lambda_function.login.function_name
+}
+
+output "login_invoke_arn" {
+  value = aws_lambda_function.login.invoke_arn
+}
+
+output "login_function_arn" {
+  value = aws_lambda_function.login.arn
+}

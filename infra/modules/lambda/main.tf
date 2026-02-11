@@ -96,3 +96,22 @@ resource "aws_lambda_function" "recipe_search" {
   }
 }
 
+resource "aws_lambda_function" "login" {
+  function_name = "${var.project_name}-login"
+  handler       = "app.handler"
+  runtime       = "python3.12"
+  role          = var.lambda_role_arn
+  filename      = "${path.module}/login.zip"
+  source_code_hash = filebase64sha256("${path.module}/login.zip")
+
+  timeout     = 10
+  memory_size = 128
+
+  environment {
+    variables = {
+      HASHED_PASSWORD     = var.hashed_password
+      DYNAMODB_TABLE_NAME = "${var.project_name}-api-stats"
+    }
+  }
+}
+
