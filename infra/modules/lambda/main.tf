@@ -19,7 +19,7 @@ resource "aws_lambda_function" "demo" {
     variables = {
       S3_BUCKET_NAME      = var.s3_bucket_name
       OPENSEARCH_ENDPOINT = var.opensearch_endpoint
-      OPENAI_API_KEY      = "REDACTED"
+      OPENAI_API_KEY      = var.openai_api_key
       DYNAMODB_TABLE_NAME = "${var.project_name}-api-stats"
     }
   }
@@ -66,7 +66,7 @@ resource "aws_lambda_function" "vision_processor" {
   environment {
     variables = {
       S3_BUCKET_NAME      = var.s3_bucket_name
-      OPENAI_API_KEY      = "REDACTED"
+      OPENAI_API_KEY      = var.openai_api_key
       OPENSEARCH_ENDPOINT = var.opensearch_endpoint
     }
   }

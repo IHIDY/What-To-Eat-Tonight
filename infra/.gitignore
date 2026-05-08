@@ -1,0 +1,6 @@
+# Terraform 本地文件（不应提交到 Git）
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.backup
+*.tfvars

@@ -13,3 +13,9 @@ variable "hashed_password" {
   description = "SHA-256 hash of the chat login password"
   sensitive   = true
 }
+
+variable "openai_api_key" {
+  type        = string
+  description = "OpenAI API key"
+  sensitive   = true
+}
