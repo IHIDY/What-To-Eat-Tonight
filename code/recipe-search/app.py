@@ -1,51 +1,35 @@
 #!/usr/bin/env python3
 """
-Recipe Search Lambda - Hybrid search with vector similarity and keyword matching
+Recipe Search Lambda - brute-force similarity search over recipes in S3
+
+No dedicated search index: every recipe JSON in S3 already carries its own
+Bedrock embedding (written by vision-processor), so a search just loads all
+of them and scores them in memory. Fine for the small recipe counts this
+project runs at; if the catalog grows into the thousands, revisit.
 """
 
 import os
+import re
 import json
+import math
 import boto3
-from opensearchpy import OpenSearch, RequestsHttpConnection
-from requests_aws4auth import AWS4Auth
+from concurrent.futures import ThreadPoolExecutor
 
 # Setup
 s3 = boto3.client('s3')
 bedrock = boto3.client('bedrock-runtime', region_name=os.environ.get('AWS_REGION', 'us-east-1'))
 
 # Configuration
-OPENSEARCH_ENDPOINT = os.environ.get('OPENSEARCH_ENDPOINT')
-AWS_REGION = os.environ.get('AWS_REGION', 'us-east-1')
 S3_BUCKET_NAME = os.environ.get('S3_BUCKET_NAME')
-OPENSEARCH_INDEX = 'recipes'
+RECIPES_PREFIX = 'recipes/json/'
 
-# Initialize OpenSearch client
-_opensearch_client = None
-
-def get_opensearch_client():
-    """Create OpenSearch client with AWS4Auth (lazy initialization)"""
-    global _opensearch_client
-
-    if _opensearch_client is None:
-        session = boto3.Session()
-        credentials = session.get_credentials()
-        awsauth = AWS4Auth(
-            credentials.access_key,
-            credentials.secret_key,
-            AWS_REGION,
-            'es',
-            session_token=credentials.token
-        )
-
-        _opensearch_client = OpenSearch(
-            hosts=[{'host': OPENSEARCH_ENDPOINT, 'port': 443}],
-            http_auth=awsauth,
-            use_ssl=True,
-            verify_certs=True,
-            connection_class=RequestsHttpConnection
-        )
-
-    return _opensearch_client
+# (field, weight) pairs used for keyword scoring
+KEYWORD_TEXT_FIELDS = [
+    ('title', 3), ('title_en', 3),
+    ('description', 2), ('description_en', 2),
+    ('semantic_text', 1),
+]
+RRF_K = 60  # reciprocal rank fusion constant, matches prior OpenSearch fallback
 
 
 def handler(event, context):
@@ -58,81 +42,85 @@ def handler(event, context):
     - limit: number of results (default: 5, max: 20)
     """
     try:
-        # Parse query parameters
         params = event.get('queryStringParameters', {}) or {}
         query = params.get('q', '').strip()
         mode = params.get('mode', 'hybrid').lower()
         limit = min(int(params.get('limit', 5)), 20)
 
         if not query:
-            return {
-                'statusCode': 400,
-                'headers': {'Content-Type': 'application/json'},
-                'body': json.dumps({'error': 'Query parameter "q" is required'})
-            }
+            return _response(400, {'error': 'Query parameter "q" is required'})
 
         print(f"Search query: '{query}', mode: {mode}, limit: {limit}")
 
-        # Perform search based on mode
-        if mode == 'semantic':
-            results = semantic_search(query, limit)
-        elif mode == 'keyword':
-            results = keyword_search(query, limit)
-        else:  # hybrid
-            results = hybrid_search(query, limit)
+        recipes = load_all_recipes()
+        print(f"Loaded {len(recipes)} recipes from S3")
 
-        # Fetch full recipe JSONs from S3
-        recipes = []
-        for result in results:
-            recipe_id = result['recipe_id']
-            score = result['score']
+        query_embedding = None
+        if mode in ('semantic', 'hybrid'):
+            query_embedding = generate_query_embedding(query)
 
-            try:
-                # Read full JSON from S3
-                json_key = f"recipes/json/{recipe_id}.json"
-                response = s3.get_object(Bucket=S3_BUCKET_NAME, Key=json_key)
-                recipe_json = json.loads(response['Body'].read().decode('utf-8'))
+        ranked = score_recipes(recipes, query, query_embedding, mode)
+        top = ranked[:limit]
 
-                # Add metadata
-                recipe_json['search_score'] = score
-                recipe_json['search_mode'] = mode
-                recipes.append(recipe_json)
+        for recipe in top:
+            recipe.pop('semantic_embedding', None)
+            recipe['search_mode'] = mode
 
-            except s3.exceptions.NoSuchKey:
-                print(f"Warning: Recipe JSON not found: {json_key}")
-                continue
-            except Exception as e:
-                print(f"Error fetching recipe {recipe_id}: {str(e)}")
-                continue
-
-        return {
-            'statusCode': 200,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
-            'body': json.dumps({
-                'query': query,
-                'mode': mode,
-                'total': len(recipes),
-                'recipes': recipes
-            }, ensure_ascii=False)
-        }
+        return _response(200, {
+            'query': query,
+            'mode': mode,
+            'total': len(top),
+            'recipes': top
+        })
 
     except Exception as e:
         print(f"Search error: {str(e)}")
         import traceback
         traceback.print_exc()
+        return _response(500, {'error': str(e)})
 
-        return {
-            'statusCode': 500,
-            'headers': {'Content-Type': 'application/json'},
-            'body': json.dumps({'error': str(e)})
-        }
+
+def _response(status_code, body):
+    return {
+        'statusCode': status_code,
+        'headers': {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+        },
+        'body': json.dumps(body, ensure_ascii=False)
+    }
+
+
+def load_all_recipes():
+    """List and fetch every recipe JSON under recipes/json/, in parallel"""
+    keys = []
+    paginator = s3.get_paginator('list_objects_v2')
+    for page in paginator.paginate(Bucket=S3_BUCKET_NAME, Prefix=RECIPES_PREFIX):
+        for obj in page.get('Contents', []):
+            if obj['Key'].endswith('.json'):
+                keys.append(obj['Key'])
+
+    if not keys:
+        return []
+
+    def fetch(key):
+        try:
+            response = s3.get_object(Bucket=S3_BUCKET_NAME, Key=key)
+            recipe = json.loads(response['Body'].read().decode('utf-8'))
+            recipe['recipe_id'] = key.rsplit('/', 1)[-1].replace('.json', '')
+            return recipe
+        except Exception as e:
+            print(f"Failed to load {key}: {e}")
+            return None
+
+    with ThreadPoolExecutor(max_workers=min(16, len(keys))) as pool:
+        results = list(pool.map(fetch, keys))
+
+    return [r for r in results if r is not None]
 
 
 def generate_query_embedding(query):
-    """Generate embedding for search query using Bedrock"""
+    """Generate embedding for search query using Bedrock Titan"""
     response = bedrock.invoke_model(
         modelId='amazon.titan-embed-text-v2:0',
         body=json.dumps({
@@ -141,197 +129,94 @@ def generate_query_embedding(query):
             "normalize": True
         })
     )
-
     response_body = json.loads(response['body'].read())
     return response_body['embedding']
 
 
-def semantic_search(query, limit):
-    """Vector similarity search using k-NN"""
-    print("Performing semantic search...")
+def cosine_similarity(a, b):
+    """Plain-Python cosine similarity; fine at this scale, no numpy needed"""
+    if not a or not b:
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(y * y for y in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
 
-    # Generate query embedding
-    query_embedding = generate_query_embedding(query)
 
-    # k-NN search
-    os_client = get_opensearch_client()
-    search_body = {
-        "size": limit,
-        "_source": ["recipe_id", "title", "title_en", "semantic_text"],
-        "query": {
-            "knn": {
-                "semantic_embedding": {
-                    "vector": query_embedding,
-                    "k": limit
-                }
-            }
+def keyword_score(query, recipe):
+    """Weighted substring match across the same fields OpenSearch used to boost"""
+    terms = [t for t in re.split(r'\s+', query.lower()) if t]
+    if not terms:
+        return 0.0
+
+    weighted_texts = []
+    for field, weight in KEYWORD_TEXT_FIELDS:
+        weighted_texts.append((str(recipe.get(field) or '').lower(), weight))
+
+    for field in ('ingredients', 'seasonings'):
+        for item in recipe.get(field, []) or []:
+            if isinstance(item, dict):
+                name = f"{item.get('name', '')} {item.get('name_en', '')}"
+            else:
+                name = str(item)
+            weighted_texts.append((name.lower(), 1))
+
+    for field in ('category', 'category_en'):
+        weighted_texts.append((' '.join(recipe.get(field, []) or []).lower(), 1))
+
+    health = recipe.get('health', {}) or {}
+    for field in ('health_tags', 'health_tags_en'):
+        weighted_texts.append((' '.join(health.get(field, []) or []).lower(), 1))
+
+    score = 0.0
+    for term in terms:
+        for text, weight in weighted_texts:
+            if term in text:
+                score += weight
+
+    return score / len(terms)
+
+
+def score_recipes(recipes, query, query_embedding, mode):
+    """
+    Score and sort recipes for the given mode.
+
+    'hybrid' combines keyword and semantic results with reciprocal rank
+    fusion (same RRF approach the old OpenSearch fallback used) instead of
+    averaging raw scores, since keyword_score and cosine_similarity live on
+    different scales.
+    """
+    for recipe in recipes:
+        recipe['_keyword_score'] = keyword_score(query, recipe) if mode in ('keyword', 'hybrid') else 0.0
+        recipe['_semantic_score'] = cosine_similarity(query_embedding, recipe.get('semantic_embedding')) \
+            if mode in ('semantic', 'hybrid') else 0.0
+
+    if mode == 'keyword':
+        for recipe in recipes:
+            recipe['search_score'] = recipe['_keyword_score']
+    elif mode == 'semantic':
+        for recipe in recipes:
+            recipe['search_score'] = recipe['_semantic_score']
+    else:  # hybrid
+        keyword_rank = {
+            r['recipe_id']: rank for rank, r in
+            enumerate(sorted(recipes, key=lambda r: r['_keyword_score'], reverse=True), 1)
         }
-    }
-
-    response = os_client.search(index=OPENSEARCH_INDEX, body=search_body)
-
-    results = []
-    for hit in response['hits']['hits']:
-        results.append({
-            'recipe_id': hit['_source']['recipe_id'],
-            'score': hit['_score'],
-            'title': hit['_source'].get('title'),
-            'title_en': hit['_source'].get('title_en')
-        })
-
-    print(f"Found {len(results)} results")
-    return results
-
-
-def keyword_search(query, limit):
-    """Text-based keyword search"""
-    print("Performing keyword search...")
-
-    os_client = get_opensearch_client()
-    search_body = {
-        "size": limit,
-        "_source": ["recipe_id", "title", "title_en", "semantic_text"],
-        "query": {
-            "multi_match": {
-                "query": query,
-                "fields": [
-                    "title^3",           # Boost title matches
-                    "title_en^3",
-                    "description^2",
-                    "description_en^2",
-                    "semantic_text",
-                    "ingredients",
-                    "seasonings",
-                    "category",
-                    "category_en",
-                    "health_tags",
-                    "health_tags_en"
-                ],
-                "type": "best_fields",
-                "fuzziness": "AUTO"   # Handle typos
-            }
+        semantic_rank = {
+            r['recipe_id']: rank for rank, r in
+            enumerate(sorted(recipes, key=lambda r: r['_semantic_score'], reverse=True), 1)
         }
-    }
+        for recipe in recipes:
+            rid = recipe['recipe_id']
+            recipe['search_score'] = (
+                1.0 / (keyword_rank[rid] + RRF_K) + 1.0 / (semantic_rank[rid] + RRF_K)
+            )
 
-    response = os_client.search(index=OPENSEARCH_INDEX, body=search_body)
+    for recipe in recipes:
+        recipe.pop('_keyword_score', None)
+        recipe.pop('_semantic_score', None)
 
-    results = []
-    for hit in response['hits']['hits']:
-        results.append({
-            'recipe_id': hit['_source']['recipe_id'],
-            'score': hit['_score'],
-            'title': hit['_source'].get('title'),
-            'title_en': hit['_source'].get('title_en')
-        })
-
-    print(f"Found {len(results)} results")
-    return results
-
-
-def hybrid_search(query, limit):
-    """
-    Hybrid search combining semantic and keyword search
-    Uses RRF (Reciprocal Rank Fusion) for combining results
-    """
-    print("Performing hybrid search...")
-
-    # Generate query embedding
-    query_embedding = generate_query_embedding(query)
-
-    os_client = get_opensearch_client()
-    search_body = {
-        "size": limit,
-        "_source": ["recipe_id", "title", "title_en", "semantic_text"],
-        "query": {
-            "hybrid": {
-                "queries": [
-                    # Semantic search (k-NN)
-                    {
-                        "knn": {
-                            "semantic_embedding": {
-                                "vector": query_embedding,
-                                "k": limit * 2  # Get more candidates
-                            }
-                        }
-                    },
-                    # Keyword search
-                    {
-                        "multi_match": {
-                            "query": query,
-                            "fields": [
-                                "title^3",
-                                "title_en^3",
-                                "description^2",
-                                "description_en^2",
-                                "semantic_text",
-                                "ingredients",
-                                "seasonings",
-                                "category",
-                                "category_en"
-                            ],
-                            "type": "best_fields",
-                            "fuzziness": "AUTO"
-                        }
-                    }
-                ]
-            }
-        }
-    }
-
-    try:
-        response = os_client.search(index=OPENSEARCH_INDEX, body=search_body)
-
-        results = []
-        for hit in response['hits']['hits']:
-            results.append({
-                'recipe_id': hit['_source']['recipe_id'],
-                'score': hit['_score'],
-                'title': hit['_source'].get('title'),
-                'title_en': hit['_source'].get('title_en')
-            })
-
-        print(f"Hybrid search found {len(results)} results")
-        return results
-
-    except Exception as e:
-        # Fallback: If hybrid query is not supported, combine results manually
-        print(f"Hybrid query not supported, using fallback: {str(e)}")
-        return hybrid_search_fallback(query, limit)
-
-
-def hybrid_search_fallback(query, limit):
-    """
-    Fallback hybrid search: run semantic and keyword separately, then merge
-    """
-    # Get results from both methods
-    semantic_results = semantic_search(query, limit)
-    keyword_results = keyword_search(query, limit)
-
-    # Combine using RRF (Reciprocal Rank Fusion)
-    recipe_scores = {}
-
-    # Add semantic results (rank-based scoring)
-    for rank, result in enumerate(semantic_results, 1):
-        recipe_id = result['recipe_id']
-        recipe_scores[recipe_id] = recipe_scores.get(recipe_id, 0) + 1.0 / (rank + 60)
-
-    # Add keyword results
-    for rank, result in enumerate(keyword_results, 1):
-        recipe_id = result['recipe_id']
-        recipe_scores[recipe_id] = recipe_scores.get(recipe_id, 0) + 1.0 / (rank + 60)
-
-    # Sort by combined score
-    sorted_recipes = sorted(recipe_scores.items(), key=lambda x: x[1], reverse=True)
-
-    # Build result list
-    results = []
-    recipe_map = {r['recipe_id']: r for r in semantic_results + keyword_results}
-
-    for recipe_id, score in sorted_recipes[:limit]:
-        if recipe_id in recipe_map:
-            result = recipe_map[recipe_id]
-            result['score'] = score
-            results.append(result)
-
-    print(f"Fallback hybrid search found {len(results)} results")
-    return results
+    recipes.sort(key=lambda r: r['search_score'], reverse=True)
+    return recipes

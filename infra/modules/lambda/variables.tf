@@ -16,11 +16,6 @@ variable "lambda_layer_arn" {
   description = "ARN of the Python dependencies Lambda Layer"
 }
 
-variable "opensearch_endpoint" {
-  type        = string
-  description = "OpenSearch domain endpoint"
-}
-
 variable "hashed_password" {
   type        = string
   description = "SHA-256 hash of the login password"

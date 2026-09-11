@@ -37,11 +37,6 @@ resource "aws_iam_role_policy" "lambda_policy" {
       },
       {
         Effect   = "Allow"
-        Action   = ["es:ESHttpPut", "es:ESHttpPost", "es:ESHttpGet", "es:ESHttpDelete"]
-        Resource = "*"
-      },
-      {
-        Effect   = "Allow"
         Action   = ["bedrock:InvokeModel"]
         Resource = [
           "arn:aws:bedrock:*::foundation-model/amazon.titan-embed-text-v2:0",
