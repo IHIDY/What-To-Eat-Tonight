@@ -1,5 +1,24 @@
 data "aws_region" "current" {}
 
+# Lambda auto-creates its log group with "never expire" retention if none of
+# these exist - that quietly accumulates cost forever for no benefit. 30 days
+# is plenty for debugging a recipe app.
+locals {
+  lambda_log_group_names = [
+    "${var.project_name}-lambda",
+    "${var.project_name}-uploader",
+    "${var.project_name}-vision-processor",
+    "${var.project_name}-recipe-search",
+    "${var.project_name}-login",
+  ]
+}
+
+resource "aws_cloudwatch_log_group" "lambda_logs" {
+  for_each          = toset(local.lambda_log_group_names)
+  name              = "/aws/lambda/${each.value}"
+  retention_in_days = 30
+}
+
 resource "aws_lambda_function" "demo" {
   function_name = "${var.project_name}-lambda"
   handler       = "app.handler"

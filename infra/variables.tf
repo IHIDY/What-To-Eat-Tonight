@@ -19,3 +19,9 @@ variable "gemini_api_key" {
   description = "Google Gemini API key"
   sensitive   = true
 }
+
+variable "budget_alert_email" {
+  type        = string
+  description = "Email notified when monthly AWS spend crosses the budget thresholds"
+  sensitive   = true
+}
