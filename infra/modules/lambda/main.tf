@@ -40,7 +40,8 @@ resource "aws_lambda_function" "uploader" {
 
   environment {
     variables = {
-      S3_BUCKET_NAME = var.s3_bucket_name
+      S3_BUCKET_NAME      = var.s3_bucket_name
+      DYNAMODB_TABLE_NAME = "${var.project_name}-api-stats"
     }
   }
 }

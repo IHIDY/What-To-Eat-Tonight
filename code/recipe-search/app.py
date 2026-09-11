@@ -12,16 +12,54 @@ import os
 import re
 import json
 import math
+import time
 import boto3
 from concurrent.futures import ThreadPoolExecutor
 
 # Setup
 s3 = boto3.client('s3')
 bedrock = boto3.client('bedrock-runtime', region_name=os.environ.get('AWS_REGION', 'us-east-1'))
+dynamodb = boto3.client('dynamodb')
 
 # Configuration
 S3_BUCKET_NAME = os.environ.get('S3_BUCKET_NAME')
+DYNAMODB_TABLE_NAME = os.environ.get('DYNAMODB_TABLE_NAME')
 RECIPES_PREFIX = 'recipes/json/'
+
+
+def is_authorized(event):
+    """Check the Authorization header against a login-issued token in DynamoDB"""
+    headers = event.get('headers') or {}
+    auth_header = headers.get('authorization') or headers.get('Authorization') or ''
+    token = auth_header[7:] if auth_header.lower().startswith('bearer ') else auth_header
+
+    if not token or not DYNAMODB_TABLE_NAME:
+        return False
+
+    try:
+        response = dynamodb.get_item(
+            TableName=DYNAMODB_TABLE_NAME,
+            Key={'metric_type': {'S': 'auth_token'}, 'metric_id': {'S': token}}
+        )
+        item = response.get('Item')
+        if not item:
+            return False
+        ttl = int(item.get('ttl', {}).get('N', '0'))
+        return ttl > int(time.time())
+    except Exception as e:
+        print(f"Auth check failed: {e}")
+        return False
+
+
+def unauthorized_response():
+    return {
+        'statusCode': 401,
+        'headers': {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+        },
+        'body': json.dumps({'error': 'Unauthorized'})
+    }
 
 # (field, weight) pairs used for keyword scoring
 KEYWORD_TEXT_FIELDS = [
@@ -42,6 +80,9 @@ def handler(event, context):
     - limit: number of results (default: 5, max: 20)
     """
     try:
+        if not is_authorized(event):
+            return unauthorized_response()
+
         params = event.get('queryStringParameters', {}) or {}
         query = params.get('q', '').strip()
         mode = params.get('mode', 'hybrid').lower()

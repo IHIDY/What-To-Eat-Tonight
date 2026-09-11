@@ -8,6 +8,7 @@ import os
 import re
 import json
 import math
+import time
 import boto3
 from datetime import datetime
 from decimal import Decimal
@@ -94,6 +95,41 @@ def record_stat(metric_type, metric_id, increment=1, extra_attributes=None):
     except Exception as e:
         # Don't fail the main request if stats recording fails
         print(f"Failed to record stat: {e}")
+
+
+def is_authorized(event):
+    """Check the Authorization header against a login-issued token in DynamoDB"""
+    headers = event.get('headers') or {}
+    auth_header = headers.get('authorization') or headers.get('Authorization') or ''
+    token = auth_header[7:] if auth_header.lower().startswith('bearer ') else auth_header
+
+    if not token or not DYNAMODB_TABLE_NAME:
+        return False
+
+    try:
+        response = dynamodb.get_item(
+            TableName=DYNAMODB_TABLE_NAME,
+            Key={'metric_type': {'S': 'auth_token'}, 'metric_id': {'S': token}}
+        )
+        item = response.get('Item')
+        if not item:
+            return False
+        ttl = int(item.get('ttl', {}).get('N', '0'))
+        return ttl > int(time.time())
+    except Exception as e:
+        print(f"Auth check failed: {e}")
+        return False
+
+
+def unauthorized_response():
+    return {
+        'statusCode': 401,
+        'headers': {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+        },
+        'body': json.dumps({'error': 'Unauthorized'})
+    }
 
 
 def load_all_recipes():
@@ -304,6 +340,9 @@ def handler(event, context):
     }
     """
     try:
+        if not is_authorized(event):
+            return unauthorized_response()
+
         # Parse request
         body = json.loads(event.get('body', '{}'))
         user_message = body.get('message', '').strip()

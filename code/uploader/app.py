@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import time
 import uuid
 from datetime import datetime
 
@@ -11,10 +12,37 @@ logger.setLevel(logging.INFO)
 # read the config from the environment
 import boto3
 s3 = boto3.client("s3")
+dynamodb = boto3.client("dynamodb")
 BUCKET = os.environ.get("S3_BUCKET_NAME", "what-to-eat-cloud-recipes")
+DYNAMODB_TABLE_NAME = os.environ.get("DYNAMODB_TABLE_NAME", "")
 
 # Presigned URL expiration time (seconds)
 PRESIGNED_URL_EXPIRATION = 3600  # 1 hour
+
+
+def is_authorized(event):
+    """Check the Authorization header against a login-issued token in DynamoDB"""
+    headers = event.get("headers") or {}
+    auth_header = headers.get("authorization") or headers.get("Authorization") or ""
+    token = auth_header[7:] if auth_header.lower().startswith("bearer ") else auth_header
+
+    if not token or not DYNAMODB_TABLE_NAME:
+        return False
+
+    try:
+        response = dynamodb.get_item(
+            TableName=DYNAMODB_TABLE_NAME,
+            Key={"metric_type": {"S": "auth_token"}, "metric_id": {"S": token}}
+        )
+        item = response.get("Item")
+        if not item:
+            return False
+        ttl = int(item.get("ttl", {}).get("N", "0"))
+        return ttl > int(time.time())
+    except Exception as e:
+        logger.error(f"Auth check failed: {e}")
+        return False
+
 
 def handler(event, context):
     """
@@ -32,6 +60,9 @@ def handler(event, context):
     logger.info(f"Received event: {json.dumps(event)}")
 
     try:
+        if not is_authorized(event):
+            return error_response(401, "Unauthorized")
+
         # Parse JSON body
         body = event.get("body")
         if not body:
