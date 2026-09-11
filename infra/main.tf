@@ -38,7 +38,7 @@ module "lambda" {
   s3_bucket_name       = module.s3.bucket_name
   lambda_layer_arn     = module.lambda_layer.layer_arn
   hashed_password      = var.hashed_password
-  openai_api_key       = var.openai_api_key
+  gemini_api_key       = var.gemini_api_key
 }
 
 module "dynamodb" {

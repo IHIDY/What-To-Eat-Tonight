@@ -18,7 +18,7 @@ resource "aws_lambda_function" "demo" {
   environment {
     variables = {
       S3_BUCKET_NAME      = var.s3_bucket_name
-      OPENAI_API_KEY      = var.openai_api_key
+      GEMINI_API_KEY      = var.gemini_api_key
       DYNAMODB_TABLE_NAME = "${var.project_name}-api-stats"
     }
   }
@@ -56,7 +56,7 @@ resource "aws_lambda_function" "vision_processor" {
   # Use Lambda Layer for dependencies
   layers = [var.lambda_layer_arn]
 
-  # Vision processing with OpenAI can take time
+  # Vision processing with Gemini can take time
   timeout = 120  # 120 seconds (2 minutes)
 
   # Need more memory for image processing
@@ -65,7 +65,7 @@ resource "aws_lambda_function" "vision_processor" {
   environment {
     variables = {
       S3_BUCKET_NAME      = var.s3_bucket_name
-      OPENAI_API_KEY      = var.openai_api_key
+      GEMINI_API_KEY      = var.gemini_api_key
     }
   }
 }

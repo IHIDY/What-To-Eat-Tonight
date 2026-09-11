@@ -5,7 +5,7 @@ import base64
 import boto3
 import time
 from datetime import datetime
-from openai import OpenAI
+from google import genai
 from urllib.parse import unquote_plus
 
 # Setup logging
@@ -17,8 +17,9 @@ s3 = boto3.client('s3')
 lambda_client = boto3.client('lambda')
 bedrock = boto3.client('bedrock-runtime', region_name=os.environ.get('AWS_REGION', 'us-east-1'))
 
-# OpenAI client
-client = OpenAI(api_key=os.environ.get('OPENAI_API_KEY'))
+# Gemini client
+client = genai.Client(api_key=os.environ.get('GEMINI_API_KEY'))
+VISION_MODEL = 'gemini-3.6-flash'
 
 # Lambda function name for self-invocation
 FUNCTION_NAME = os.environ.get('AWS_LAMBDA_FUNCTION_NAME')
@@ -138,7 +139,7 @@ def handler(event, context):
 
 
 def process_recipe_image(bucket, image_key):
-    """Extract recipe information from all images in the same folder using GPT-5.1 multimodal model"""
+    """Extract recipe information from all images in the same folder using Gemini's multimodal model"""
     logger.info(f"Triggered by: s3://{bucket}/{image_key}")
 
     try:
@@ -183,53 +184,37 @@ def process_recipe_image(bucket, image_key):
         except Exception as e:
             logger.warning(f"Failed to delete marker file: {str(e)}")
 
-        # Download and encode all images
-        image_contents = []
+        # Download and base64-encode all images (Interactions API content blocks are plain dicts)
+        image_parts = []
         for img_key in sorted(image_keys):  # Sort to maintain consistent order
             img_response = s3.get_object(Bucket=bucket, Key=img_key)
             img_bytes = img_response['Body'].read()
-            img_base64 = base64.b64encode(img_bytes).decode('utf-8')
 
-            # Determine image type
             img_type = "image/jpeg"
             if img_key.lower().endswith('.png'):
                 img_type = "image/png"
 
-            image_contents.append({
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:{img_type};base64,{img_base64}"
-                }
+            image_parts.append({
+                "type": "image",
+                "data": base64.b64encode(img_bytes).decode('utf-8'),
+                "mime_type": img_type
             })
 
-        # Build message content with prompt + all images
-        message_content = [{"type": "text", "text": RECIPE_EXTRACTION_PROMPT}]
-        message_content.extend(image_contents)
+        logger.info(f"Calling Gemini API with {len(image_parts)} images...")
 
-        logger.info(f"Calling OpenAI GPT-5.1 API with {len(image_contents)} images...")
-
-        # Call OpenAI API with GPT-5.1 multimodal model
-        completion = client.chat.completions.create(
-            model="gpt-5.1",
-            messages=[
-                {
-                    "role": "user",
-                    "content": message_content
-                }
-            ],
-            max_completion_tokens=16000,
-            temperature=0.2,
-            response_format={"type": "json_object"}
+        # Call Gemini multimodal model via the Interactions API
+        interaction = client.interactions.create(
+            model=VISION_MODEL,
+            input=[{"type": "text", "text": RECIPE_EXTRACTION_PROMPT}] + image_parts,
+            response_format={"type": "text", "mime_type": "application/json"},
+            generation_config={"temperature": 0.2, "max_output_tokens": 16000}
         )
 
-        # Extract response text
-        logger.info(f"Completion object: finish_reason={completion.choices[0].finish_reason if completion.choices else 'NO_CHOICES'}")
+        response_text = interaction.output_text
 
-        response_text = completion.choices[0].message.content
-
-        if response_text is None:
-            logger.error(f"OpenAI returned None content! Full response: {completion.model_dump_json()}")
-            raise ValueError("OpenAI returned None content")
+        if not response_text:
+            logger.error(f"Gemini returned no content! Interaction id: {interaction.id}")
+            raise ValueError("Gemini returned no content")
 
         response_text = response_text.strip()
         logger.info(f"Response text length: {len(response_text)} characters")
@@ -260,7 +245,7 @@ def process_recipe_image(bucket, image_key):
             Metadata={
                 'source-folder': folder_prefix,
                 'image-count': str(len(image_keys)),
-                'model': 'gpt-5.1'
+                'model': VISION_MODEL
             }
         )
 
@@ -464,51 +449,37 @@ def regenerate_recipe_json(bucket, folder_prefix, upload_id):
 
         logger.info(f"Regenerating with {len(remaining_images)} images: {remaining_images}")
 
-        # Download and encode all images
-        image_contents = []
+        # Download and base64-encode all images (Interactions API content blocks are plain dicts)
+        image_parts = []
         for img_key in sorted(remaining_images):
             img_response = s3.get_object(Bucket=bucket, Key=img_key)
             img_bytes = img_response['Body'].read()
-            img_base64 = base64.b64encode(img_bytes).decode('utf-8')
 
             img_type = "image/jpeg"
             if img_key.lower().endswith('.png'):
                 img_type = "image/png"
 
-            image_contents.append({
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:{img_type};base64,{img_base64}"
-                }
+            image_parts.append({
+                "type": "image",
+                "data": base64.b64encode(img_bytes).decode('utf-8'),
+                "mime_type": img_type
             })
 
-        # Build message content
-        message_content = [{"type": "text", "text": RECIPE_EXTRACTION_PROMPT}]
-        message_content.extend(image_contents)
+        logger.info(f"Calling Gemini API with {len(image_parts)} images...")
 
-        logger.info(f"Calling OpenAI GPT-5.1 API with {len(image_contents)} images...")
-
-        # Call OpenAI API
-        completion = client.chat.completions.create(
-            model="gpt-5.1",
-            messages=[
-                {
-                    "role": "user",
-                    "content": message_content
-                }
-            ],
-            max_completion_tokens=16000,
-            temperature=0.2,
-            response_format={"type": "json_object"}
+        # Call Gemini multimodal model via the Interactions API
+        interaction = client.interactions.create(
+            model=VISION_MODEL,
+            input=[{"type": "text", "text": RECIPE_EXTRACTION_PROMPT}] + image_parts,
+            response_format={"type": "text", "mime_type": "application/json"},
+            generation_config={"temperature": 0.2, "max_output_tokens": 16000}
         )
 
-        logger.info(f"Regeneration - Completion: finish_reason={completion.choices[0].finish_reason if completion.choices else 'NO_CHOICES'}")
+        response_text = interaction.output_text
 
-        response_text = completion.choices[0].message.content
-
-        if response_text is None:
-            logger.error(f"Regeneration - OpenAI returned None! Full response: {completion.model_dump_json()}")
-            raise ValueError("OpenAI returned None content in regeneration")
+        if not response_text:
+            logger.error(f"Regeneration - Gemini returned no content! Interaction id: {interaction.id}")
+            raise ValueError("Gemini returned no content in regeneration")
 
         response_text = response_text.strip()
         logger.info(f"Regeneration - Response length: {len(response_text)} chars")
@@ -536,7 +507,7 @@ def regenerate_recipe_json(bucket, folder_prefix, upload_id):
             Metadata={
                 'source-folder': folder_prefix,
                 'image-count': str(len(remaining_images)),
-                'model': 'gpt-5.1',
+                'model': VISION_MODEL,
                 'regenerated': 'true'
             }
         )

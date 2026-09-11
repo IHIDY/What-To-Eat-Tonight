@@ -14,8 +14,8 @@ variable "hashed_password" {
   sensitive   = true
 }
 
-variable "openai_api_key" {
+variable "gemini_api_key" {
   type        = string
-  description = "OpenAI API key"
+  description = "Google Gemini API key"
   sensitive   = true
 }

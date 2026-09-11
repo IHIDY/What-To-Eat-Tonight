@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Chat Lambda - AI-powered recipe assistant with search capability
-Uses OpenAI GPT with function calling to search recipes and provide recommendations
+Uses Gemini function calling to search recipes and provide recommendations
 """
 
 import os
@@ -11,11 +11,11 @@ import math
 import boto3
 from datetime import datetime
 from decimal import Decimal
-from openai import OpenAI
+from google import genai
 from concurrent.futures import ThreadPoolExecutor
 
 # Setup
-client = OpenAI(api_key=os.environ.get('OPENAI_API_KEY'))
+client = genai.Client(api_key=os.environ.get('GEMINI_API_KEY'))
 bedrock = boto3.client('bedrock-runtime', region_name=os.environ.get('AWS_REGION', 'us-east-1'))
 s3 = boto3.client('s3')
 dynamodb = boto3.client('dynamodb')
@@ -24,6 +24,10 @@ dynamodb = boto3.client('dynamodb')
 S3_BUCKET_NAME = os.environ.get('S3_BUCKET_NAME')
 DYNAMODB_TABLE_NAME = os.environ.get('DYNAMODB_TABLE_NAME')
 RECIPES_PREFIX = 'recipes/json/'
+CHAT_MODEL = 'gemini-3.6-flash'
+# Rough blended estimate for cost tracking, same "good enough" approach the
+# old OpenAI code used - check current Gemini pricing if this needs to be exact
+GEMINI_PRICE_PER_MILLION_TOKENS = 0.50
 
 # (field, weight) pairs used for keyword scoring
 KEYWORD_TEXT_FIELDS = [
@@ -39,8 +43,8 @@ def record_stat(metric_type, metric_id, increment=1, extra_attributes=None):
     Record statistics to DynamoDB
 
     Args:
-        metric_type: Type of metric (e.g., 'api_call', 'openai_api_call', 'recipe_view')
-        metric_id: ID of the metric (e.g., 'POST_/chat', 'gpt-4o', recipe_id)
+        metric_type: Type of metric (e.g., 'api_call', 'gemini_api_call', 'recipe_view')
+        metric_id: ID of the metric (e.g., 'POST_/chat', 'gemini-3.6-flash', recipe_id)
         increment: Value to increment count by (default: 1)
         extra_attributes: Dictionary of additional attributes to update (e.g., total_tokens, total_cost)
     """
@@ -251,6 +255,44 @@ def search_recipes(query, mode='hybrid', limit=5):
         return []
 
 
+SEARCH_RECIPES_TOOL = {
+    "type": "function",
+    "name": "search_recipes",
+    "description": "Search for recipes in the database. Use this when the user asks about finding recipes, looking for dishes, or wants recommendations based on ingredients, cuisine type, difficulty, or health considerations.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Search query. Can be ingredients (e.g., 'pork ribs'), dish name (e.g., 'steamed dishes'), cuisine type (e.g., 'Cantonese'), or health requirements (e.g., 'low sodium')."
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["semantic", "keyword", "hybrid"],
+                "description": "Search mode. Use 'semantic' for concept-based search, 'keyword' for exact matches, 'hybrid' for best results (default)."
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Number of recipes to return (default: 5, max: 10)"
+            }
+        },
+        "required": ["query"]
+    }
+}
+
+SYSTEM_INSTRUCTION = """You are a helpful recipe assistant. You help users find recipes and provide cooking advice.
+
+When users ask about recipes, use the search_recipes function to find relevant recipes from the database.
+
+After searching, provide:
+1. A brief introduction
+2. List of recommended recipes with key details (title, difficulty, servings, key ingredients)
+3. Brief explanation of why each recipe fits their request
+4. Any relevant cooking tips or health considerations
+
+Be conversational and friendly. Support both Chinese and English. Use emojis occasionally to make it engaging."""
+
+
 def handler(event, context):
     """
     Lambda handler for chat endpoint
@@ -258,14 +300,14 @@ def handler(event, context):
     Accepts POST requests with:
     {
         "message": "User's question about recipes",
-        "conversation_history": [...]  // Optional
+        "interaction_id": "..."  // Optional, from the previous response - continues that conversation
     }
     """
     try:
         # Parse request
         body = json.loads(event.get('body', '{}'))
         user_message = body.get('message', '').strip()
-        conversation_history = body.get('conversation_history', [])
+        interaction_id = body.get('interaction_id')
 
         if not user_message:
             return {
@@ -279,151 +321,72 @@ def handler(event, context):
         # Record API call
         record_stat('api_call', 'POST_/chat')
 
-        # Define tools for OpenAI function calling
-        tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "search_recipes",
-                    "description": "Search for recipes in the database. Use this when the user asks about finding recipes, looking for dishes, or wants recommendations based on ingredients, cuisine type, difficulty, or health considerations.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "query": {
-                                "type": "string",
-                                "description": "Search query. Can be ingredients (e.g., 'pork ribs'), dish name (e.g., 'steamed dishes'), cuisine type (e.g., 'Cantonese'), or health requirements (e.g., 'low sodium')."
-                            },
-                            "mode": {
-                                "type": "string",
-                                "enum": ["semantic", "keyword", "hybrid"],
-                                "description": "Search mode. Use 'semantic' for concept-based search, 'keyword' for exact matches, 'hybrid' for best results (default).",
-                                "default": "hybrid"
-                            },
-                            "limit": {
-                                "type": "integer",
-                                "description": "Number of recipes to return (default: 5, max: 10)",
-                                "default": 5,
-                                "minimum": 1,
-                                "maximum": 10
-                            }
-                        },
-                        "required": ["query"]
-                    }
-                }
-            }
-        ]
+        # Gemini's Interactions API keeps conversation state server-side;
+        # each call only needs the new input plus the previous interaction's id
+        current_input = user_message
 
-        # Build messages for OpenAI
-        messages = [
-            {
-                "role": "system",
-                "content": """You are a helpful recipe assistant. You help users find recipes and provide cooking advice.
-
-When users ask about recipes, use the search_recipes function to find relevant recipes from the database.
-
-After searching, provide:
-1. A brief introduction
-2. List of recommended recipes with key details (title, difficulty, servings, key ingredients)
-3. Brief explanation of why each recipe fits their request
-4. Any relevant cooking tips or health considerations
-
-Be conversational and friendly. Support both Chinese and English. Use emojis occasionally to make it engaging."""
-            }
-        ] + conversation_history + [
-            {
-                "role": "user",
-                "content": user_message
-            }
-        ]
-
-        # Call OpenAI with function calling
         max_iterations = 3
         iteration = 0
 
         while iteration < max_iterations:
             iteration += 1
-            print(f"OpenAI iteration {iteration}")
+            print(f"Gemini iteration {iteration}")
 
-            # Call OpenAI
-            response = client.chat.completions.create(
-                model="gpt-4o",
-                messages=messages,
-                tools=tools,
-                tool_choice="auto"
+            interaction = client.interactions.create(
+                model=CHAT_MODEL,
+                input=current_input,
+                tools=[SEARCH_RECIPES_TOOL],
+                system_instruction=SYSTEM_INSTRUCTION,
+                previous_interaction_id=interaction_id
             )
+            interaction_id = interaction.id
 
-            response_message = response.choices[0].message
-            print(f"OpenAI response: finish_reason={response.choices[0].finish_reason}")
-
-            # Record OpenAI API call statistics
-            if hasattr(response, 'usage') and response.usage:
-                tokens_used = response.usage.total_tokens
-                # GPT-5.1 pricing: input $1.25/1M, output $10.00/1M
-                # Using average of $5.625/1M for simplicity
-                estimated_cost = Decimal(str(tokens_used * 5.625 / 1_000_000))
+            # Record Gemini API call statistics (best-effort; don't let this break chat)
+            try:
+                tokens_used = interaction.usage.total_tokens
+                estimated_cost = Decimal(str(tokens_used * GEMINI_PRICE_PER_MILLION_TOKENS / 1_000_000))
                 record_stat(
-                    'openai_api_call',
-                    'gpt-5.1',
+                    'gemini_api_call',
+                    CHAT_MODEL,
                     extra_attributes={
                         'total_tokens': tokens_used,
                         'total_cost': estimated_cost
                     }
                 )
+            except Exception as e:
+                print(f"Could not record token usage: {e}")
 
-            # Add assistant's response to messages
-            # Convert response_message to dict for JSON serialization
-            assistant_message = {
-                "role": "assistant",
-                "content": response_message.content
-            }
-            if response_message.tool_calls:
-                assistant_message["tool_calls"] = [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments
-                        }
-                    }
-                    for tc in response_message.tool_calls
-                ]
-            messages.append(assistant_message)
+            function_call_steps = [s for s in (interaction.steps or []) if s.type == 'function_call']
 
-            # Check if tool calls are needed
-            tool_calls = response_message.tool_calls
-
-            if tool_calls:
+            if function_call_steps:
                 # Execute tool calls
-                for tool_call in tool_calls:
-                    function_name = tool_call.function.name
-                    function_args = json.loads(tool_call.function.arguments)
+                result_input = []
+                for step in function_call_steps:
+                    function_name = step.name
+                    function_args = step.arguments or {}
 
                     print(f"Executing function: {function_name} with args: {function_args}")
 
                     if function_name == 'search_recipes':
-                        # Execute search
                         recipes = search_recipes(
                             query=function_args.get('query'),
                             mode=function_args.get('mode', 'hybrid'),
                             limit=function_args.get('limit', 5)
                         )
 
-                        # Add function result to messages
-                        messages.append({
-                            "tool_call_id": tool_call.id,
-                            "role": "tool",
+                        result_input.append({
+                            "type": "function_result",
                             "name": function_name,
-                            "content": json.dumps(recipes, ensure_ascii=False)
+                            "call_id": step.id,
+                            "result": json.dumps({"recipes": recipes}, ensure_ascii=False)
                         })
 
-                # Continue loop to get OpenAI's final response
+                # Feed the function results back in and continue the loop
+                current_input = result_input
                 continue
 
             else:
                 # No tool calls, return the final response
-                final_response = response_message.content
-
                 return {
                     'statusCode': 200,
                     'headers': {
@@ -431,8 +394,8 @@ Be conversational and friendly. Support both Chinese and English. Use emojis occ
                         'Access-Control-Allow-Origin': '*'
                     },
                     'body': json.dumps({
-                        'response': final_response,
-                        'conversation_history': messages[1:]  # Exclude system message
+                        'response': interaction.output_text,
+                        'interaction_id': interaction_id
                     }, ensure_ascii=False)
                 }
 
