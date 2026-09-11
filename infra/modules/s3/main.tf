@@ -10,6 +10,27 @@ resource "aws_s3_bucket_versioning" "versioning" {
   }
 }
 
+resource "aws_s3_bucket_lifecycle_configuration" "recipes_lifecycle" {
+  bucket = aws_s3_bucket.recipes.id
+
+  rule {
+    id     = "expire-noncurrent-versions"
+    status = "Enabled"
+
+    filter {}
+
+    # Versioning is on but nothing ever cleans up old versions - without this,
+    # every overwritten image/JSON keeps its prior versions around forever
+    noncurrent_version_expiration {
+      noncurrent_days = 30
+    }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+  }
+}
+
 resource "aws_s3_bucket_cors_configuration" "recipes_cors" {
   bucket = aws_s3_bucket.recipes.id
 

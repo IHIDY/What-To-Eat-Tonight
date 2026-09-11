@@ -9,3 +9,7 @@ variable "s3_bucket_arn" {
 variable "vision_processor_lambda_arn" {
   type = string
 }
+
+variable "vision_processor_dlq_arn" {
+  type = string
+}

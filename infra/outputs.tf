@@ -9,3 +9,8 @@ output "lambda_name" {
 output "api_url" {
   value = module.apigw.invoke_url
 }
+
+output "vision_processor_dlq_url" {
+  value       = module.lambda.vision_processor_dlq_url
+  description = "SQS queue holding failed vision-processor invocations - check here if a recipe never shows up after upload"
+}

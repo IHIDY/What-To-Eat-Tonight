@@ -24,6 +24,7 @@ module "iam" {
   project_name                 = var.project_name
   s3_bucket_arn                = module.s3.bucket_arn
   vision_processor_lambda_arn  = module.lambda.vision_processor_function_arn
+  vision_processor_dlq_arn     = module.lambda.vision_processor_dlq_arn
 }
 
 module "lambda_layer" {

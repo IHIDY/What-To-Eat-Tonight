@@ -37,6 +37,11 @@ resource "aws_iam_role_policy" "lambda_policy" {
       },
       {
         Effect   = "Allow"
+        Action   = ["sqs:SendMessage"]
+        Resource = var.vision_processor_dlq_arn
+      },
+      {
+        Effect   = "Allow"
         Action   = ["bedrock:InvokeModel"]
         Resource = "arn:aws:bedrock:*::foundation-model/amazon.titan-embed-text-v2:0"
       },

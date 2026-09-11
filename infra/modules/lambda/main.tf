@@ -67,6 +67,25 @@ resource "aws_lambda_function" "vision_processor" {
     variables = {
       S3_BUCKET_NAME      = var.s3_bucket_name
       GEMINI_API_KEY      = var.gemini_api_key
+      DYNAMODB_TABLE_NAME = "${var.project_name}-api-stats"
+    }
+  }
+}
+
+# Vision-processor is invoked asynchronously by S3 events - by default a
+# failure (Gemini timeout, bad JSON, etc.) just retries twice and then
+# disappears with no visibility. Route failures here instead.
+resource "aws_sqs_queue" "vision_processor_dlq" {
+  name                      = "${var.project_name}-vision-processor-dlq"
+  message_retention_seconds = 1209600 # 14 days
+}
+
+resource "aws_lambda_function_event_invoke_config" "vision_processor" {
+  function_name = aws_lambda_function.vision_processor.function_name
+
+  destination_config {
+    on_failure {
+      destination = aws_sqs_queue.vision_processor_dlq.arn
     }
   }
 }

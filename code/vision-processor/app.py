@@ -15,6 +15,7 @@ logger.setLevel(logging.INFO)
 # AWS clients
 s3 = boto3.client('s3')
 lambda_client = boto3.client('lambda')
+dynamodb = boto3.client('dynamodb')
 bedrock = boto3.client('bedrock-runtime', region_name=os.environ.get('AWS_REGION', 'us-east-1'))
 
 # Gemini client
@@ -24,6 +25,40 @@ VISION_MODEL = 'gemini-3.6-flash'
 # Lambda function name for self-invocation
 FUNCTION_NAME = os.environ.get('AWS_LAMBDA_FUNCTION_NAME')
 REGENERATION_DELAY_SECONDS = 10
+DYNAMODB_TABLE_NAME = os.environ.get('DYNAMODB_TABLE_NAME')
+
+
+def try_acquire_lock(lock_id, ttl_seconds=86400):
+    """
+    Claim a one-time-use lock via a conditional DynamoDB write.
+
+    Guards against duplicate/concurrent S3 events (e.g. a retried marker
+    upload, or overlapping regeneration checks) triggering the same
+    expensive Gemini call twice. Each lock_id is unique per logical event,
+    so it's meant to block forever, not expire and allow a retry - the ttl
+    is just for eventual DynamoDB cleanup. Fails open (allows processing) if
+    the lock table itself is unreachable, so a DynamoDB hiccup never blocks
+    the actual feature.
+    """
+    if not DYNAMODB_TABLE_NAME:
+        return True
+
+    try:
+        dynamodb.put_item(
+            TableName=DYNAMODB_TABLE_NAME,
+            Item={
+                'metric_type': {'S': 'processing_lock'},
+                'metric_id': {'S': lock_id},
+                'ttl': {'N': str(int(time.time()) + ttl_seconds)}
+            },
+            ConditionExpression='attribute_not_exists(metric_type)'
+        )
+        return True
+    except dynamodb.exceptions.ConditionalCheckFailedException:
+        return False
+    except Exception as e:
+        logger.error(f"Lock acquisition failed for {lock_id}: {e}")
+        return True
 
 # Recipe extraction prompt using your schema (bilingual Chinese/English)
 RECIPE_EXTRACTION_PROMPT = """你是一个专业的食谱分析助手。我会提供一张或多张同一道菜的食谱图片，请综合分析所有图片，提取完整的菜谱信息并以 JSON 格式返回。
@@ -146,6 +181,12 @@ def process_recipe_image(bucket, image_key):
         # Only process when .complete marker file is uploaded
         if not image_key.endswith('.complete'):
             logger.info(f"Skipping non-marker file: {image_key}")
+            return
+
+        # Guard against duplicate/concurrent triggers for the same marker
+        # (retried upload, overlapping S3 events) re-running the Gemini call
+        if not try_acquire_lock(f"vision:{bucket}/{image_key}"):
+            logger.info(f"Already processed or in-flight, skipping duplicate: {image_key}")
             return
 
         # Get upload_id folder from marker file key
@@ -411,10 +452,13 @@ def handle_regeneration_check(event):
         time_diff = (datetime.utcnow() - marker_time).total_seconds()
 
         if time_diff >= REGENERATION_DELAY_SECONDS:
-            logger.info(f"Regenerating JSON for {upload_id} (waited {time_diff:.2f}s)")
-
-            # Regenerate JSON with remaining images
-            regenerate_recipe_json(bucket, folder_prefix, upload_id)
+            # Overlapping delete events can each schedule their own check;
+            # only the first one to reach this exact marker state should regenerate
+            if try_acquire_lock(f"regen:{upload_id}:{marker_time_str}"):
+                logger.info(f"Regenerating JSON for {upload_id} (waited {time_diff:.2f}s)")
+                regenerate_recipe_json(bucket, folder_prefix, upload_id)
+            else:
+                logger.info(f"Regeneration for {upload_id} at {marker_time_str} already handled, skipping duplicate")
 
             # Delete marker file
             s3.delete_object(Bucket=bucket, Key=marker_key)
